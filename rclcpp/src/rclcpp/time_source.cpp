@@ -283,15 +283,15 @@ public:
 
 
     // TODO(tfoote) use parameters interface not subscribe to events via topic ticketed #609
-    parameter_subscription_ = rclcpp::AsyncParametersClient::on_parameter_event(
-      node_topics_,
-      [this](std::shared_ptr<const rcl_interfaces::msg::ParameterEvent> event) {
-        if (node_base_ != nullptr) {
-          this->on_parameter_event(event);
-        }
-        // Do nothing if node_base_ is nullptr because it means the TimeSource is now
-        // without an attached node
-      });
+//    parameter_subscription_ = rclcpp::AsyncParametersClient::on_parameter_event(
+//      node_topics_,
+//      [this](std::shared_ptr<const rcl_interfaces::msg::ParameterEvent> event) {
+//        if (node_base_ != nullptr) {
+//          this->on_parameter_event(event);
+//        }
+//        // Do nothing if node_base_ is nullptr because it means the TimeSource is now
+//        // without an attached node
+//      });
   }
 
   // Detach the attached node
@@ -505,7 +505,7 @@ private:
 
   // An enum to hold the parameter state
   enum UseSimTimeParameterState {UNSET, SET_TRUE, SET_FALSE};
-  UseSimTimeParameterState parameter_state_;
+  UseSimTimeParameterState parameter_state_ = UseSimTimeParameterState::SET_FALSE;
 };
 
 TimeSource::TimeSource(
