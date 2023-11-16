@@ -278,8 +278,8 @@ public:
       throw std::invalid_argument("Invalid type for parameter 'use_sim_time', should be 'bool'");
     }
 
-    on_set_parameters_callback_ = node_parameters_->add_on_set_parameters_callback(
-      std::bind(&TimeSource::NodeState::on_set_parameters, this, std::placeholders::_1));
+//    on_set_parameters_callback_ = node_parameters_->add_on_set_parameters_callback(
+//      std::bind(&TimeSource::NodeState::on_set_parameters, this, std::placeholders::_1));
 
 
     // TODO(tfoote) use parameters interface not subscribe to events via topic ticketed #609
