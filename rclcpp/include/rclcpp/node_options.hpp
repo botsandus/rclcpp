@@ -433,7 +433,7 @@ private:
 
   bool start_parameter_services_ {true};
 
-  bool start_parameter_event_publisher_ {true};
+  bool start_parameter_event_publisher_ {false};
 
   rcl_clock_type_t clock_type_ {RCL_ROS_TIME};
 
