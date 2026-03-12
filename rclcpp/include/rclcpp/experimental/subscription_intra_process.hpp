@@ -17,6 +17,7 @@
 
 #include <rmw/types.h>
 
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -29,7 +30,9 @@
 #include "rclcpp/context.hpp"
 #include "rclcpp/experimental/buffers/intra_process_buffer.hpp"
 #include "rclcpp/experimental/subscription_intra_process_buffer.hpp"
+#include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
+#include "rclcpp/time.hpp"
 #include "rclcpp/type_support_decl.hpp"
 #include "tracetools/tracetools.h"
 
@@ -71,13 +74,18 @@ public:
   using MessageUniquePtr = typename SubscriptionIntraProcessBufferT::SubscribedTypeUniquePtr;
   using BufferUniquePtr = typename SubscriptionIntraProcessBufferT::BufferUniquePtr;
 
+  /// Type-erased stats handler to avoid pulling in subscription_topic_statistics.hpp
+  /// which creates a circular include via publisher.hpp -> callback_group.hpp.
+  using StatsHandlerFn = std::function<void(const rmw_message_info_t &, const rclcpp::Time &)>;
+
   SubscriptionIntraProcess(
     AnySubscriptionCallback<MessageT, Alloc> callback,
     std::shared_ptr<Alloc> allocator,
     rclcpp::Context::SharedPtr context,
     const std::string & topic_name,
     const rclcpp::QoS & qos_profile,
-    rclcpp::IntraProcessBufferType buffer_type)
+    rclcpp::IntraProcessBufferType buffer_type,
+    StatsHandlerFn stats_handler = nullptr)
   : SubscriptionIntraProcessBuffer<SubscribedType, SubscribedTypeAlloc,
       SubscribedTypeDeleter, ROSMessageType>(
       std::make_shared<SubscribedTypeAlloc>(*allocator),
@@ -85,7 +93,8 @@ public:
       topic_name,
       qos_profile,
       buffer_type),
-    any_callback_(callback)
+    any_callback_(callback),
+    stats_handler_(std::move(stats_handler))
   {
     TRACETOOLS_TRACEPOINT(
       rclcpp_subscription_callback_added,
@@ -174,6 +183,16 @@ protected:
     msg_info.publisher_gid = {0, {0}};
     msg_info.from_intra_process = true;
 
+    std::chrono::time_point<std::chrono::system_clock> now;
+    if (stats_handler_) {
+      RCLCPP_WARN_ONCE(
+        rclcpp::get_logger("rclcpp"),
+        "Intra-process communication does not support accurate message age statistics");
+      now = std::chrono::system_clock::now();
+      const auto nanos = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
+      msg_info.source_timestamp = nanos.time_since_epoch().count();
+    }
+
     auto shared_ptr = std::static_pointer_cast<std::pair<ConstMessageSharedPtr, MessageUniquePtr>>(
       data);
 
@@ -185,9 +204,16 @@ protected:
       any_callback_.dispatch_intra_process(std::move(unique_msg), msg_info);
     }
     shared_ptr.reset();
+
+    if (stats_handler_) {
+      const auto nanos = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
+      stats_handler_(msg_info, rclcpp::Time(nanos.time_since_epoch().count()));
+    }
   }
 
   AnySubscriptionCallback<MessageT, Alloc> any_callback_;
+  /// Type-erased statistics callback, populated when topic statistics are enabled.
+  StatsHandlerFn stats_handler_;
 };
 
 }  // namespace experimental
