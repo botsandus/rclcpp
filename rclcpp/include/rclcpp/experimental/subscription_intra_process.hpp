@@ -17,6 +17,7 @@
 
 #include <rmw/types.h>
 
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -29,19 +30,11 @@
 #include "rclcpp/context.hpp"
 #include "rclcpp/experimental/buffers/intra_process_buffer.hpp"
 #include "rclcpp/experimental/subscription_intra_process_buffer.hpp"
+#include "rclcpp/logging.hpp"
 #include "rclcpp/qos.hpp"
 #include "rclcpp/time.hpp"
 #include "rclcpp/type_support_decl.hpp"
-#include "rclcpp/logging.hpp"
 #include "tracetools/tracetools.h"
-
-namespace rclcpp
-{
-namespace topic_statistics
-{
-class SubscriptionTopicStatistics;
-}  // namespace topic_statistics
-}  // namespace rclcpp
 
 namespace rclcpp
 {
@@ -80,8 +73,10 @@ public:
   using ConstMessageSharedPtr = typename SubscriptionIntraProcessBufferT::ConstDataSharedPtr;
   using MessageUniquePtr = typename SubscriptionIntraProcessBufferT::SubscribedTypeUniquePtr;
   using BufferUniquePtr = typename SubscriptionIntraProcessBufferT::BufferUniquePtr;
-  using SubscriptionTopicStatisticsSharedPtr =
-    std::shared_ptr<rclcpp::topic_statistics::SubscriptionTopicStatistics>;
+
+  /// Type-erased stats handler to avoid pulling in subscription_topic_statistics.hpp
+  /// which creates a circular include via publisher.hpp -> callback_group.hpp.
+  using StatsHandlerFn = std::function<void(const rmw_message_info_t &, const rclcpp::Time &)>;
 
   SubscriptionIntraProcess(
     AnySubscriptionCallback<MessageT, Alloc> callback,
@@ -90,7 +85,7 @@ public:
     const std::string & topic_name,
     const rclcpp::QoS & qos_profile,
     rclcpp::IntraProcessBufferType buffer_type,
-    SubscriptionTopicStatisticsSharedPtr subscription_topic_statistics = nullptr)
+    StatsHandlerFn stats_handler = nullptr)
   : SubscriptionIntraProcessBuffer<SubscribedType, SubscribedTypeAlloc,
       SubscribedTypeDeleter, ROSMessageType>(
       std::make_shared<SubscribedTypeAlloc>(*allocator),
@@ -99,7 +94,7 @@ public:
       qos_profile,
       buffer_type),
     any_callback_(callback),
-    subscription_topic_statistics_(std::move(subscription_topic_statistics))
+    stats_handler_(std::move(stats_handler))
   {
     TRACETOOLS_TRACEPOINT(
       rclcpp_subscription_callback_added,
@@ -189,7 +184,7 @@ protected:
     msg_info.from_intra_process = true;
 
     std::chrono::time_point<std::chrono::system_clock> now;
-    if (subscription_topic_statistics_) {
+    if (stats_handler_) {
       RCLCPP_WARN_ONCE(
         rclcpp::get_logger("rclcpp"),
         "Intra-process communication does not support accurate message age statistics");
@@ -208,16 +203,15 @@ protected:
     }
     shared_ptr.reset();
 
-    if (subscription_topic_statistics_) {
+    if (stats_handler_) {
       const auto nanos = std::chrono::time_point_cast<std::chrono::nanoseconds>(now);
-      const auto time = rclcpp::Time(nanos.time_since_epoch().count());
-      subscription_topic_statistics_->handle_message(msg_info, time);
+      stats_handler_(msg_info, rclcpp::Time(nanos.time_since_epoch().count()));
     }
   }
 
   AnySubscriptionCallback<MessageT, Alloc> any_callback_;
-  /// Optional statistics calculator for intra-process deliveries.
-  SubscriptionTopicStatisticsSharedPtr subscription_topic_statistics_;
+  /// Type-erased statistics callback, populated when topic statistics are enabled.
+  StatsHandlerFn stats_handler_;
 };
 
 }  // namespace experimental
