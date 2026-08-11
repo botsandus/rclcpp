@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <chrono>
 #include <memory>
 #include <optional>
 #include <string>
@@ -158,6 +159,10 @@ int main(int argc, char * argv[])
       "thread_num is not supported by the SingleThreadedExecutor. Ignoring...");
   }
   if (args.isolated) {
+    // [REPRO -- REVERT] widen the throwaway-manager window so a waiting
+    // LoadComposableNodes client discovers this manager's load service and its
+    // request is dropped when the throwaway node is destroyed below.
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
     // we use the ComponentManager node initially to get the `thread_num` parameter,
     // but temporarily delete it here before re-assigning it
     // if running with a ComponentManagerIsolated.
