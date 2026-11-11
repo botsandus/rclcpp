@@ -161,6 +161,20 @@ IntraProcessManager::get_subscription_count(uint64_t intra_process_publisher_id)
   return count;
 }
 
+bool
+IntraProcessManager::only_take_ownership_subscriptions(uint64_t intra_process_publisher_id) const
+{
+  std::shared_lock<std::shared_timed_mutex> lock(mutex_);
+
+  auto publisher_it = pub_to_subs_.find(intra_process_publisher_id);
+  if (publisher_it == pub_to_subs_.end()) {
+    return false;
+  }
+
+  return publisher_it->second.take_shared_subscriptions.empty() &&
+         !publisher_it->second.take_ownership_subscriptions.empty();
+}
+
 SubscriptionIntraProcessBase::SharedPtr
 IntraProcessManager::get_subscription_intra_process(uint64_t intra_process_subscription_id)
 {

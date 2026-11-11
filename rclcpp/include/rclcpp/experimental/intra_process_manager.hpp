@@ -371,6 +371,20 @@ public:
   size_t
   get_subscription_count(uint64_t intra_process_publisher_id) const;
 
+  /// Return true if all the intraprocess subscriptions matched with a given publisher id
+  /// require ownership of the message.
+  /**
+   * This is true when there is at least one subscription that requires ownership and no
+   * subscription that can take a shared message.
+   * Return false if the publisher id is not found.
+   *
+   * \param intra_process_publisher_id the id of the publisher.
+   * \return true if there are only subscriptions requiring ownership, false otherwise.
+   */
+  RCLCPP_PUBLIC
+  bool
+  only_take_ownership_subscriptions(uint64_t intra_process_publisher_id) const;
+
   RCLCPP_PUBLIC
   rclcpp::experimental::SubscriptionIntraProcessBase::SharedPtr
   get_subscription_intra_process(uint64_t intra_process_subscription_id);

@@ -232,6 +232,13 @@ public:
     // interprocess publish, resulting in lower publish-to-subscribe latency.
     // It's not possible to do that with an unique_ptr,
     // as do_intra_process_publish takes the ownership of the message.
+    //
+    // The exception is when every intraprocess subscription requires ownership.
+    // Promoting would then need a deep copy of the message, as the owning
+    // subscriptions may modify or destroy it while it is being published
+    // interprocess. Instead, the interprocess publish is done first, while this
+    // function still has exclusive ownership of the message, and the ownership
+    // is then transferred to the intraprocess subscriptions without a copy.
 
     // When durability is set to TransientLocal (i.e. there is a buffer),
     // inter process publish should always take place to ensure
@@ -240,6 +247,11 @@ public:
       get_subscription_count() > get_intra_process_subscription_count() || buffer_;
 
     if (inter_process_publish_needed) {
+      if (!buffer_ && this->intra_process_subscriptions_only_take_ownership()) {
+        this->do_inter_process_publish(*msg);
+        this->do_intra_process_ros_message_publish(std::move(msg));
+        return;
+      }
       auto shared_msg =
         this->do_intra_process_ros_message_publish_and_return_shared(std::move(msg));
       if (buffer_) {
@@ -503,6 +515,17 @@ protected:
       intra_process_publisher_id_,
       std::move(msg),
       published_type_allocator_);
+  }
+
+  /// Return true if all the matched intraprocess subscriptions require ownership.
+  bool
+  intra_process_subscriptions_only_take_ownership() const
+  {
+    auto ipm = weak_ipm_.lock();
+    if (!ipm) {
+      return false;
+    }
+    return ipm->only_take_ownership_subscriptions(intra_process_publisher_id_);
   }
 
   void

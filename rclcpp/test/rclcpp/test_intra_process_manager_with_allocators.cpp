@@ -15,11 +15,14 @@
 #include <gmock/gmock.h>
 
 #include <chrono>
+#include <future>
 #include <list>
 #include <memory>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "test_msgs/msg/empty.hpp"
 
@@ -303,4 +306,165 @@ TEST(TestIntraProcessManagerWithAllocators, custom_allocator_wrong) {
     MemoryStrategyAllocatorT,
     std::runtime_error  // expected exception
   >(allocator, allocator, my_allocator, my_allocator, my_allocator, allocator);
+}
+
+struct InterProcessMixResult
+{
+  uint32_t allocations_during_publish = 0;
+  size_t intra_process_received = 0;
+  bool inter_process_received = false;
+  bool owner_received_published_message = false;
+};
+
+/*
+   Publish one message to `num_owning` intra-process subscriptions taking a unique_ptr,
+   `num_shared` intra-process subscriptions taking a shared_ptr, and one subscription
+   with intra-process disabled (so an inter-process publish is needed).
+   Messages are allocated with MyAllocator, so `allocations_during_publish` counts the
+   message copies made by rclcpp while publishing.
+ */
+void
+publish_to_intra_and_inter_process_subscriptions(
+  size_t num_owning, size_t num_shared, InterProcessMixResult & result)
+{
+  using AllocatorT = MyAllocator<void>;
+  using MessageAllocTraits = rclcpp::allocator::AllocRebind<test_msgs::msg::Empty, AllocatorT>;
+  using MessageAlloc = typename MessageAllocTraits::allocator_type;
+  using MessageDeleter = rclcpp::allocator::Deleter<MessageAlloc, test_msgs::msg::Empty>;
+  using MessageUniquePtr = std::unique_ptr<test_msgs::msg::Empty, MessageDeleter>;
+  using MessageMemoryStrategyT =
+    rclcpp::message_memory_strategy::MessageMemoryStrategy<test_msgs::msg::Empty, AllocatorT>;
+  const std::string topic = "inter_process_mix_test";
+
+  auto context = std::make_shared<rclcpp::Context>();
+  context->init(0, nullptr);
+  auto node = std::make_shared<rclcpp::Node>(
+    "inter_process_mix_test",
+    rclcpp::NodeOptions().context(context).use_intra_process_comms(true));
+
+  rclcpp::PublisherOptionsWithAllocator<AllocatorT> publisher_options;
+  publisher_options.allocator = std::make_shared<AllocatorT>();
+  auto publisher =
+    node->create_publisher<test_msgs::msg::Empty>(topic, 10, publisher_options);
+
+  const test_msgs::msg::Empty * published_ptr = nullptr;
+
+  rclcpp::SubscriptionOptionsWithAllocator<AllocatorT> subscription_options;
+  subscription_options.allocator = std::make_shared<AllocatorT>();
+  auto msg_mem_strat = std::make_shared<MessageMemoryStrategyT>(std::make_shared<AllocatorT>());
+
+  std::vector<rclcpp::SubscriptionBase::SharedPtr> subscriptions;
+  for (size_t i = 0; i < num_owning; ++i) {
+    auto callback = [&result, &published_ptr](MessageUniquePtr msg) {
+        ++result.intra_process_received;
+        if (msg.get() == published_ptr) {
+          result.owner_received_published_message = true;
+        }
+      };
+    subscriptions.push_back(
+      node->create_subscription<
+        test_msgs::msg::Empty, decltype(callback), AllocatorT,
+        rclcpp::Subscription<test_msgs::msg::Empty, AllocatorT>, MessageMemoryStrategyT>(
+        topic, 10, std::move(callback), subscription_options, msg_mem_strat));
+  }
+  for (size_t i = 0; i < num_shared; ++i) {
+    auto callback = [&result](std::shared_ptr<const test_msgs::msg::Empty>) {
+        ++result.intra_process_received;
+      };
+    subscriptions.push_back(
+      node->create_subscription<
+        test_msgs::msg::Empty, decltype(callback), AllocatorT,
+        rclcpp::Subscription<test_msgs::msg::Empty, AllocatorT>, MessageMemoryStrategyT>(
+        topic, 10, std::move(callback), subscription_options, msg_mem_strat));
+  }
+
+  rclcpp::SubscriptionOptions inter_process_options;
+  inter_process_options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
+  subscriptions.push_back(
+    node->create_subscription<test_msgs::msg::Empty>(
+      topic, 10,
+      [&result](std::shared_ptr<const test_msgs::msg::Empty>) {
+        result.inter_process_received = true;
+      }, inter_process_options));
+
+  // Wait for the middleware to match the inter-process subscription.
+  const size_t expected_intra = num_owning + num_shared;
+  const auto discovery_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (publisher->get_subscription_count() < expected_intra + 1 &&
+    std::chrono::steady_clock::now() < discovery_deadline)
+  {
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  ASSERT_EQ(expected_intra + 1, publisher->get_subscription_count());
+  ASSERT_EQ(expected_intra, publisher->get_intra_process_subscription_count());
+
+  rclcpp::ExecutorOptions options;
+  options.context = context;
+  rclcpp::executors::SingleThreadedExecutor executor(options);
+  executor.add_node(node);
+
+  MessageAlloc message_allocator;
+  MessageDeleter message_deleter;
+  rclcpp::allocator::set_allocator_for_deleter(&message_deleter, &message_allocator);
+  auto ptr = MessageAllocTraits::allocate(message_allocator, 1);
+  MessageAllocTraits::construct(message_allocator, ptr);
+  MessageUniquePtr msg(ptr, message_deleter);
+  published_ptr = ptr;
+
+  num_allocs = 0;
+  publisher->publish(std::move(msg));
+  result.allocations_during_publish = num_allocs;
+
+  const auto receive_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while ((result.intra_process_received < expected_intra || !result.inter_process_received) &&
+    std::chrono::steady_clock::now() < receive_deadline)
+  {
+    executor.spin_some(std::chrono::milliseconds(10));
+  }
+  EXPECT_EQ(expected_intra, result.intra_process_received);
+  EXPECT_TRUE(result.inter_process_received);
+
+  context->shutdown("test finished");
+}
+
+/*
+   With only an owning intra-process subscription, the inter-process publish must not
+   require a copy of the message: the owning subscription receives the published message.
+ */
+TEST(TestIntraProcessManagerWithAllocators, inter_process_mix_one_owning_no_copy) {
+  InterProcessMixResult result;
+  publish_to_intra_and_inter_process_subscriptions(1, 0, result);
+  EXPECT_EQ(0u, result.allocations_during_publish);
+  EXPECT_TRUE(result.owner_received_published_message);
+}
+
+/*
+   With N owning intra-process subscriptions, only the N-1 copies needed for ownership
+   are made.
+ */
+TEST(TestIntraProcessManagerWithAllocators, inter_process_mix_two_owning_one_copy) {
+  InterProcessMixResult result;
+  publish_to_intra_and_inter_process_subscriptions(2, 0, result);
+  EXPECT_EQ(1u, result.allocations_during_publish);
+  EXPECT_TRUE(result.owner_received_published_message);
+}
+
+/*
+   With owning and shared intra-process subscriptions, one shared copy is required,
+   and it is reused for the inter-process publish.
+ */
+TEST(TestIntraProcessManagerWithAllocators, inter_process_mix_owning_and_shared_one_copy) {
+  InterProcessMixResult result;
+  publish_to_intra_and_inter_process_subscriptions(1, 1, result);
+  EXPECT_EQ(1u, result.allocations_during_publish);
+  EXPECT_TRUE(result.owner_received_published_message);
+}
+
+/*
+   With only shared intra-process subscriptions, the message is promoted without a copy.
+ */
+TEST(TestIntraProcessManagerWithAllocators, inter_process_mix_shared_only_no_copy) {
+  InterProcessMixResult result;
+  publish_to_intra_and_inter_process_subscriptions(0, 1, result);
+  EXPECT_EQ(0u, result.allocations_during_publish);
 }
